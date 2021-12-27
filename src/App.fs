@@ -102,14 +102,14 @@ let newConfiguration () =
                               { p with ValidationRules = validateHasStringPrefix "s2" p::p.ValidationRules })]
     { Languages = [{ Language = "English"; Parameters = mkLangParam "1st value" "2nd value" }
                    { Language = "French"; Parameters = mkLangParam "1ère valeur" "2ème valeur" }]
-      Parameters = []
+      Parameters = [(let p = { Name = "s3"
+                               UiName = "Third string"
+                               Description = "The third string, which is language independent"
+                               PerLanguage = false
+                               ValidationRules = []
+                               ValueAndDefault = S { Default = "s3 value"; Value = "s3 value" }}
+                     { p with ValidationRules = validateHasStringPrefix "s3" p::p.ValidationRules })]
       Name = "Demo configuration" }
-
-let init() =
-    { ActiveTab = General
-      Configuration = newConfiguration ()
-      ValidationErrors = []
-    }
 
 let updateNoValidate (msg: Msg) (state: State): State =
     match msg with
@@ -119,12 +119,40 @@ let updateNoValidate (msg: Msg) (state: State): State =
             let newConfiguration = { state.Configuration with Languages = newDependents }
             { state with Configuration = newConfiguration }
         | SetProjectName newName -> { state with Configuration = { state.Configuration with Name = newName}}
+        | SetString (name, None, newValue) ->
+            { state with
+                  Configuration = {
+                      state.Configuration with
+                          Parameters =
+                              List.map (fun p -> match p with
+                                                 | { ValueAndDefault = S { Default = d } } when p.Name = name ->
+                                                     { p with ValueAndDefault = S { Default = d; Value = newValue }}
+                                                 | _ -> p)
+                                       state.Configuration.Parameters } }
         | _ -> state
 
+let validateParameters (env: Parameter list) =
+    let linkify = function
+        | ({ PerLanguage = true}, m) -> { Tab = LanguageDependent; Message = m }
+        | ({ PerLanguage = false}, m) -> { Tab = LanguageIndependent; Message = m }
+    List.map (fun p -> List.map (fun r -> (p, r env)) p.ValidationRules) env
+    |> List.map (List.filter (fun (_, s) -> not (s = null || s = "")))
+    |> List.map (List.map linkify)
+    |> List.concat
+
 let validateState state =
-    if state.Configuration.Name.Trim() = ""
-    then [{ Tab = General; Message = "Configuration Project Name may not be blank." }]
-    else []
+    let errorsInGeneralTab =
+        if state.Configuration.Name.Trim() = ""
+        then [{ Tab = General; Message = "Configuration Project Name may not be blank." }]
+        else []
+    let envs: (Parameter list) list =
+        match state.Configuration.Languages with
+            | [] -> [state.Configuration.Parameters]
+            | languages -> List.map (fun (ldp: LanguageDependentParameters) ->
+                                        List.concat [state.Configuration.Parameters; ldp.Parameters])
+                                    languages
+    List.concat [errorsInGeneralTab
+                 List.map validateParameters envs |> List.concat]
 
 let update (msg: Msg) (state: State): State =
     let newState = updateNoValidate msg state
@@ -175,8 +203,45 @@ let renderGeneralTab (state: State) (dispatch: Msg -> unit) =
          ::List.map (fun x -> languageWidget x.Language) (state.Configuration.Languages)
      ) |> Html.div
 
+let renderParameterInput
+        (p: Parameter)
+        (id: string)
+        (setString: string -> Msg)
+        (setBool: bool -> Msg)
+        (onChange: Msg -> unit) =
+    match p.ValueAndDefault with
+        | I { Value = v } ->
+            Html.input [prop.id id
+                        prop.value v
+                        prop.type' "number"
+                        setString >> onChange |> prop.onTextChange]
+        | S { Value = s } ->
+            Html.input [prop.id id
+                        prop.value s
+                        prop.type' "text"
+                        setString >> onChange |> prop.onTextChange]
+        | B { Value = b } ->
+            Html.input [prop.id id
+                        prop.value p.Name
+                        prop.type' "checkbox"
+                        if b then prop.attributeName "checked"
+                        setBool >> onChange |> prop.onCheckedChange]
+
 let renderIndependentTab (state: State) (dispatch: Msg -> unit) =
-    Html.div []
+    let renderLabelAndInput (p: Parameter) =
+        let pid = sprintf "lang-independent-%s" p.Name
+        Html.div [
+            sprintf "div-for-%s" pid |> prop.id
+            prop.children [
+                Html.label [
+                    prop.for' pid
+                    prop.text p.Description]
+                renderParameterInput p
+                                     pid
+                                     (fun s -> SetString (p.Name, None, s))
+                                     (fun b -> SetBool (p.Name, None, b))
+                                     dispatch]]
+    List.map renderLabelAndInput state.Configuration.Parameters |> Html.div
 
 let renderValidationErrors (state: State) (dispatch: Msg -> unit) =
     let children = match state.ValidationErrors with
@@ -194,10 +259,16 @@ let render (state: State) (dispatch: Msg -> unit) =
         renderTabHeader state.ActiveTab dispatch
         match state.ActiveTab with
             | General -> renderGeneralTab state dispatch
-            | LanguageIndependent -> Html.div [Html.p [prop.text "Language independent tab still to implement."]]
+            | LanguageIndependent -> renderIndependentTab state dispatch
             | LanguageDependent -> Html.div [Html.p [prop.text "Language dependent tab still to implement."]]
         renderValidationErrors state dispatch
     ]
+
+let init() =
+    let state = { ActiveTab = General
+                  Configuration = newConfiguration()
+                  ValidationErrors = [] }
+    { state with ValidationErrors = validateState state }
 
 Program.mkSimple init update render
 |> Program.withReactSynchronous "elmish-app"
