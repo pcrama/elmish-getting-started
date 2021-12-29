@@ -259,6 +259,11 @@ let renderGeneralTab (state: State) (dispatch: Msg -> unit) =
          ::List.map (fun x -> languageWidget x) (state.Configuration.Languages)
      ) |> Html.div
 
+let limitingToInt32OnChange (setInt32: int -> Msg) (onChange: Msg -> unit) (newValue: int): unit =
+    if (System.Int32.MinValue <= newValue) && (newValue <= System.Int32.MaxValue)
+    then newValue |> setInt32 |> onChange
+    else ()
+
 let renderParameterInput
         (p: MinimalParameter)
         (id: string)
@@ -271,7 +276,7 @@ let renderParameterInput
         Html.input [prop.id id
                     prop.value v
                     prop.type' "number"
-                    setInt32 >> onChange |> prop.onChange]
+                    limitingToInt32OnChange setInt32 onChange |> prop.onChange]
     | S { Value = s } ->
         Html.input [prop.id id
                     prop.value s
