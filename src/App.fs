@@ -99,7 +99,7 @@ let validateHasMinMaxLength (min: int) (max: int) (p: INamedParameter): Validati
                      (fun s -> let len = s.Length
                                if ((min <= len) && (len <= max))
                                then ""
-                               else sprintf "'%s' should be between %d and %d." p.UiName min max)
+                               else sprintf "'%s' should be between %d and %d characters." p.UiName min max)
     rule
 
 let newConfiguration () =
@@ -117,10 +117,10 @@ let newConfiguration () =
                                   [validateHasStringPrefix "s2" p]))]
     { Languages = ["English"; "French"]
       LanguageDependent = mkLangParam "t1" "t2"
-      Parameters = [(let p = MinimalParameter(
-                                "s3", "Third string", S { Default = "s3 value"; Value = "s3 value" }, None)
+      Parameters = [(let p = NamedParameter("s3", "Third string")
                      new IndependentParameter(
                         p,
+                        S { Default = "s3 value"; Value = "s3 value" },
                         "The third string, which is language independent",
                         [validateHasStringPrefix "s3" p]))
                     new IndependentParameter(
@@ -137,6 +137,15 @@ let newConfiguration () =
                         [])]
       Name = "Demo configuration" }
 
+let replaceIndependentParameters (state: State) (name: string) (clone: IndependentParameter -> IndependentParameter) =
+    let conf = state.Configuration
+    { state with Configuration = { conf with Parameters = replaceByCloneIfNameMatch name clone conf.Parameters }}
+
+let replaceLanguageParameters (state: State) (language: string) (name: string) (clone: int -> LanguageParameter -> LanguageParameter) =
+    let idx = findLanguage language state.Configuration.Languages
+    let conf = state.Configuration
+    { state with Configuration = { conf with LanguageDependent = replaceByCloneIfNameMatch name (clone idx) conf.LanguageDependent }}
+
 let updateNoValidate (msg: Msg) (state: State): State =
     match msg with
     | SwitchTab newTab -> { state with ActiveTab = newTab }
@@ -150,54 +159,23 @@ let updateNoValidate (msg: Msg) (state: State): State =
         { state with Configuration = newConfiguration }
     | SetProjectName newName -> { state with Configuration = { state.Configuration with Name = newName}}
     | SetString (name, None, newValue) ->
-        { state with
-              Configuration = {
-                  state.Configuration with
-                      Parameters =
-                          List.map (fun (p: IndependentParameter) ->
-                                        let validatable = p :> IValidatableParameter
-                                        match validatable.ValueAndDefault with
-                                        | S vad when validatable.Name = name ->
-                                            IndependentParameter(
-                                                p :> INamedParameter,
-                                                S { vad with Value = newValue },
-                                                p.Description,
-                                                validatable.ValidationRules)
-                                        | _ -> p)
-                                   state.Configuration.Parameters } }
+        let clone p = IndependentParameter(p, newValue)
+        replaceIndependentParameters state name clone
+    | SetString (name, Some language, newValue) ->
+        let clone idx p = LanguageParameter(p, idx, newValue)
+        replaceLanguageParameters state language name clone
     | SetInt32 (name, None, newValue) ->
-        { state with
-              Configuration = {
-                  state.Configuration with
-                      Parameters =
-                          List.map (fun (p: IndependentParameter) ->
-                                        let validatable = p :> IValidatableParameter
-                                        match validatable.ValueAndDefault with
-                                        | I vad when validatable.Name = name ->
-                                            IndependentParameter(
-                                                p :> INamedParameter,
-                                                I { vad with Value = newValue },
-                                                p.Description,
-                                                validatable.ValidationRules)
-                                        | _ -> p)
-                                   state.Configuration.Parameters } }
+        let clone p = IndependentParameter(p, newValue)
+        replaceIndependentParameters state name clone
+    | SetInt32 (name, Some language, newValue) ->
+        let clone idx p = LanguageParameter(p, idx, newValue)
+        replaceLanguageParameters state language name clone
     | SetBool (name, None, newValue) ->
-        { state with
-              Configuration = {
-                  state.Configuration with
-                      Parameters =
-                          List.map (fun (p: IndependentParameter) ->
-                                        let validatable = p :> IValidatableParameter
-                                        match validatable.ValueAndDefault with
-                                        | B vad when validatable.Name = name ->
-                                            IndependentParameter(
-                                                p :> INamedParameter,
-                                                B { vad with Value = newValue },
-                                                p.Description,
-                                                validatable.ValidationRules)
-                                        | _ -> p)
-                                   state.Configuration.Parameters } }
-    | _ -> state
+        let clone p = IndependentParameter(p, newValue)
+        replaceIndependentParameters state name clone
+    | SetBool (name, Some language, newValue) ->
+        let clone idx p = LanguageParameter(p, idx, newValue)
+        replaceLanguageParameters state language name clone
 
 let validateParameters (env: IValidatableParameter list) =
     List.map (fun (p: IValidatableParameter) -> List.map (fun r -> r env |> p.linkify) p.ValidationRules) env
@@ -207,6 +185,10 @@ let validateParameters (env: IValidatableParameter list) =
                  | { Language = Some _; Message = m } -> { Tab = LanguageDependent; Message = m }
                  | { Language = None; Message = m } -> { Tab = LanguageIndependent; Message = m })
 
+let rec enumerateList i = function
+    | [] -> []
+    | x::tail -> (i, x)::enumerateList (i + 1) tail
+
 let validateState state =
     let errorsInGeneralTab =
         if state.Configuration.Name.Trim() = ""
@@ -214,9 +196,6 @@ let validateState state =
         else []
     let castToValidatable x = x :> IValidatableParameter
     let validatableLanguageIndependent = List.map castToValidatable state.Configuration.Parameters
-    let rec enumerateList i = function
-        | [] -> []
-        | x::tail -> (i, x)::enumerateList (i + 1) tail
     let validatableLanguageDependent idx languageName =
         state.Configuration.LanguageDependent
         |> List.map (fun p -> new MinimalParameter(p, idx, languageName) :> IValidatableParameter)
@@ -334,13 +313,34 @@ let renderValidationErrors (state: State) (dispatch: Msg -> unit) =
     Html.footer [prop.className "footer"
                  prop.children children]
 
+let renderDependentTab (state: State) (dispatch: Msg -> unit) =
+    let header = List.map (fun (s: string) -> Html.th [prop.text s]) (" "::(state.Configuration.Languages))
+    let enumLanguages = enumerateList 0 state.Configuration.Languages
+    let makeRow (p: LanguageParameter) =
+        let firstCell = Html.th [prop.text p.Description]
+        let makeCell (i, language) =
+            let name = (p :> INamedParameter).Name
+            let input =
+                renderParameterInput (new MinimalParameter(p, i, language))
+                                     (sprintf "%s-%d" name i)
+                                     (fun s -> SetString (name, Some language, s))
+                                     (fun i -> SetInt32 (name, Some language, i))
+                                     (fun b -> SetBool (name, Some language, b))
+                                     dispatch
+            Html.td [input]
+        firstCell::List.map makeCell enumLanguages |> Html.tr
+    let rows = List.map makeRow state.Configuration.LanguageDependent
+    Html.table [
+        Html.thead [Html.tr header]
+        Html.tbody rows]
+
 let render (state: State) (dispatch: Msg -> unit) =
     Html.div [
         renderTabHeader state.ActiveTab dispatch
         match state.ActiveTab with
         | General -> renderGeneralTab state dispatch
         | LanguageIndependent -> renderIndependentTab state dispatch
-        | LanguageDependent -> Html.div [Html.p [prop.text "Language dependent tab still to implement."]]
+        | LanguageDependent -> renderDependentTab state dispatch
         renderValidationErrors state dispatch
     ]
 
