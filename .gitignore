@@ -200,3 +200,4 @@ project.lock.json
 .fable
 .ionide
 main.js
+/dist/*.js.LICENSE.txt
