@@ -43,16 +43,20 @@ type ActiveTab =
     | LanguageIndependent
     | LanguageDependent
 
-type LinkedMessage = { Tab: ActiveTab; Message: string }
+type LinkedMessage = { Tab: ActiveTab; Language: string option; Name: string; Message: string }
+
+type FocusInput = { Language: string option; Name: string }
 
 type State =
     { Configuration: Configuration
       ActiveTab: ActiveTab
       ValidationErrors: LinkedMessage list
+      FocusInput: FocusInput option
     }
 
 type Msg =
     | SwitchTab of ActiveTab
+    | SwitchFocus of ActiveTab * FocusInput
     | SetBool of string * string Option * bool
     | SetString of string * string Option * string
     | SetInt32 of string * string Option * int32
@@ -148,7 +152,8 @@ let replaceLanguageParameters (state: State) (language: string) (name: string) (
 
 let updateNoValidate (msg: Msg) (state: State): State =
     match msg with
-    | SwitchTab newTab -> { state with ActiveTab = newTab }
+    | SwitchTab newTab -> { state with ActiveTab = newTab; FocusInput = None }
+    | SwitchFocus (newTab, focusInput) -> { state with ActiveTab = newTab; FocusInput = Some focusInput }
     | SetLanguageOrder newLangs ->
         let newDependents = reshuffleLanguages (state.Configuration.Languages)
                                                (state.Configuration.LanguageDependent)
@@ -182,8 +187,16 @@ let validateParameters (env: IValidatableParameter list) =
     |> List.map (List.filter (fun { Message = s } -> not (s = null || s = "")))
     |> List.concat
     |> List.map (function
-                 | { Language = Some _; Message = m } -> { Tab = LanguageDependent; Message = m }
-                 | { Language = None; Message = m } -> { Tab = LanguageIndependent; Message = m })
+                 | { Language = (Some _) as someLanguage; Message = m; Name = name } ->
+                     { Tab = LanguageDependent
+                       Language = someLanguage
+                       Name = name
+                       Message = m }
+                 | { Language = None; Message = m; Name = name } ->
+                     { Tab = LanguageIndependent
+                       Language = None
+                       Name = name
+                       Message = m })
 
 let rec enumerateList i = function
     | [] -> []
@@ -192,7 +205,10 @@ let rec enumerateList i = function
 let validateState state =
     let errorsInGeneralTab =
         if state.Configuration.Name.Trim() = ""
-        then [{ Tab = General; Message = "Configuration Project Name may not be blank." }]
+        then [{ Tab = General;
+                Message = "Configuration Project Name may not be blank."
+                Language = None
+                Name = "configuration-project-name" }]
         else []
     let castToValidatable x = x :> IValidatableParameter
     let validatableLanguageIndependent = List.map castToValidatable state.Configuration.Parameters
@@ -236,17 +252,22 @@ let renderTabHeader (activeTab: ActiveTab) (dispatch: Msg -> unit) =
                                            prop.onClick (fun _ -> SwitchTab LanguageDependent |> dispatch)
                                            prop.text "Per Language"]]]]]]
 
-let inputText (id: string) (label: string) (value: string) (onChange: string -> unit) =
+let inputText (id: string) (label: string) (value: string) (onChange: string -> unit) (focus: bool) =
+    let basicInputProps = [
+                prop.id id
+                prop.type' "text"
+                prop.value value
+                prop.onTextChange onChange]
     Html.div [
         sprintf "div-just-for-%s" id |> prop.id
         prop.children [
             Html.label [
                 prop.htmlFor id
                 prop.text label]
-            Html.input [
-                prop.type' "text"
-                prop.value value
-                prop.onTextChange onChange]]]
+            (if focus
+             then (prop.className "focus")::basicInputProps
+             else basicInputProps)
+            |> Html.input ]]
 
 let renderGeneralTab (state: State) (dispatch: Msg -> unit) =
     let updateConfigurationProjectName newName =
@@ -255,7 +276,8 @@ let renderGeneralTab (state: State) (dispatch: Msg -> unit) =
         Html.div [prop.text languageName]
     ((inputText "configuration-project-name" "Configuration Project Name"
                    state.Configuration.Name
-                   updateConfigurationProjectName)
+                   updateConfigurationProjectName
+                   (state.FocusInput = Some { Language = None; Name = "configuration-project-name" }))
          ::List.map (fun x -> languageWidget x) (state.Configuration.Languages)
      ) |> Html.div
 
@@ -270,29 +292,35 @@ let renderParameterInput
         (setString: string -> Msg)
         (setInt32: int -> Msg)
         (setBool: bool -> Msg)
+        (focus: bool)
         (onChange: Msg -> unit) =
-    match (p :> IValidatableParameter).ValueAndDefault with
-    | I { Value = v } ->
-        Html.input [prop.id id
-                    prop.value v
-                    prop.type' "number"
-                    limitingToInt32OnChange setInt32 onChange |> prop.onChange]
-    | S { Value = s } ->
-        Html.input [prop.id id
-                    prop.value s
-                    prop.type' "text"
-                    setString >> onChange |> prop.onTextChange]
-    | B { Value = b } ->
-        Html.input [prop.id id
-                    prop.value (p :> INamedParameter).Name
-                    prop.type' "checkbox"
-                    if b then prop.attributeName "checked"
-                    setBool >> onChange |> prop.onCheckedChange]
+    let baseInputProps =
+        prop.id id::match (p :> IValidatableParameter).ValueAndDefault with
+                    | I { Value = v } ->
+                        [prop.value v
+                         prop.type' "number"
+                         limitingToInt32OnChange setInt32 onChange |> prop.onChange]
+                    | S { Value = s } ->
+                        [prop.value s
+                         prop.type' "text"
+                         setString >> onChange |> prop.onTextChange]
+                    | B { Value = b } ->
+                        [prop.value (p :> INamedParameter).Name
+                         prop.type' "checkbox"
+                         if b then prop.attributeName "checked"
+                         setBool >> onChange |> prop.onCheckedChange]
+    Html.input (if focus
+                then (prop.className "focus")::baseInputProps
+                else baseInputProps)
 
 let renderIndependentTab (state: State) (dispatch: Msg -> unit) =
     let renderLabelAndInput (p: IndependentParameter) =
         let name = (p :> INamedParameter).Name
         let pid = sprintf "lang-independent-%s" name
+        let focus = match state with
+                    | { FocusInput = Some { Language = None; Name = focusName } } ->
+                        focusName = name
+                    | _ -> false
         Html.div [
             sprintf "div-for-%s" pid |> prop.id
             prop.children [
@@ -304,15 +332,22 @@ let renderIndependentTab (state: State) (dispatch: Msg -> unit) =
                                      (fun s -> SetString (name, None, s))
                                      (fun i -> SetInt32 (name, None, i))
                                      (fun b -> SetBool (name, None, b))
+                                     focus
                                      dispatch]]
     List.map renderLabelAndInput state.Configuration.Parameters |> Html.div
 
 let renderValidationErrors (state: State) (dispatch: Msg -> unit) =
+    let makeMsg (x: LinkedMessage) =
+        match x with
+        | { Tab = General } -> SwitchFocus (General, { Language = None; Name = "configuration-project-name" })
+        | { Tab = LanguageIndependent } ->
+            SwitchFocus (LanguageIndependent, { Language = None; Name = x.Name })
+        | { Tab = LanguageDependent } -> SwitchFocus (LanguageDependent, { Language = x.Language; Name = x.Name })
     let children = match state.ValidationErrors with
                    | [] -> [Html.div [prop.text "No validation errors."]]
                    | xs -> List.map (fun (x: LinkedMessage) -> Html.div [
                                          Html.a [prop.href "#"
-                                                 prop.onClick (fun _ -> SwitchTab x.Tab |> dispatch)
+                                                 prop.onClick (fun _ -> makeMsg x |> dispatch)
                                                  prop.text x.Message]])
                                     xs
     Html.footer [prop.className "footer"
@@ -325,12 +360,17 @@ let renderDependentTab (state: State) (dispatch: Msg -> unit) =
         let firstCell = Html.th [prop.text p.Description]
         let makeCell (i, language) =
             let name = (p :> INamedParameter).Name
+            let focus = match state with
+                        | { FocusInput = Some { Language = Some focusLang; Name = focusName } } ->
+                            focusLang = language && focusName = name
+                        | _ -> false
             let input =
                 renderParameterInput (new MinimalParameter(p, i, language))
                                      (sprintf "%s-%d" name i)
                                      (fun s -> SetString (name, Some language, s))
                                      (fun i -> SetInt32 (name, Some language, i))
                                      (fun b -> SetBool (name, Some language, b))
+                                     focus
                                      dispatch
             Html.td [input]
         firstCell::List.map makeCell enumLanguages |> Html.tr
@@ -352,7 +392,8 @@ let render (state: State) (dispatch: Msg -> unit) =
 let init() =
     let state = { ActiveTab = General
                   Configuration = newConfiguration()
-                  ValidationErrors = [] }
+                  ValidationErrors = []
+                  FocusInput = None }
     { state with ValidationErrors = validateState state }
 
 Program.mkSimple init update render
